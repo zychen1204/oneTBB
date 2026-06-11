@@ -2,8 +2,11 @@
 
 ### *Capacity-Aware Work Stealing — 對應研究提案 §2.1（痛點 B：工作竊取的不對稱失衡）*
 
-> 程式碼位置：`oneTBB/` repo 的 **`caws`** branch（基於 oneTBB master / 2023.1 dev，commit `49d935b`）。
-> 修改前後可直接以 `git diff master..caws` 檢視，共 9 個檔案、+506/−49 行。
+> 程式碼位置：[github.com/zychen1204/oneTBB](https://github.com/zychen1204/oneTBB) 的
+> **`caws`** branch（基於 oneTBB master / 2023.1 dev，commit `b430e87`）；
+> 完整研究材料（本報告、gem5 設定、PARSEC 移植）在 **`caws-research`** branch 的 `research/`。
+> 修改前後可直接以 [master...caws diff](https://github.com/zychen1204/oneTBB/compare/master...caws)
+> 檢視，共 9 個檔案、+506/−49 行。
 
 ---
 
@@ -147,36 +150,43 @@ Branch：`oneTBB` repo 的 `caws`（`git diff master..caws`）。
 libtbb.a + 四個靜態 benchmark）、`gem5/scripts/vm_run_sims.sh`（四組模擬同時執行，
 完成後自動產出 `SUMMARY.txt` 並關機）；細節見 `gem5/README.md`。
 
-### 4.1 模擬系統規格（4P + 8E，Raptor-Lake-like，1P:2E 核心比）
+### 4.1 模擬系統規格（4P + 8E，1P:2E 核心比，`X86MinorCPU`）
 
-**P-core（Golden/Raptor Cove 級，`X86O3CPU`）— CPU 0–3**
+> **CPU 模型選擇**：最初採用 gem5 的詳細亂序模型 `X86O3CPU`（實測過 ROB 512 與
+> 1024 兩種組態），但長時間 PARSEC 模擬會在特定 x86 微指令序列觸發 O3 的
+> TimeBuffer assertion（elaborate 成功、執行一段時間後 panic）。最終改用 gem5
+> 較健壯的詳細 in-order 管線 `X86MinorCPU`，以**管線寬度、時脈、cache 拓樸與
+> 分支預測器大小**建模 P/E 差異——CAWS 反應的是核心間「相對吞吐量差」，與
+> 是否亂序無關（真實 E-core / LITTLE core 本就偏窄管線）。
+
+**P-core（寬管線）— CPU 0–3**
 
 | 參數 | 值 |
 |------|-----|
 | 時脈 | 4.0 GHz（獨立 clock domain） |
-| 管線寬度 | 8-wide fetch/decode/rename，6-wide commit/squash |
-| ROB / IQ | 1024 / 320 entries |
-| Load/Store Queue | 256 / 160 |
-| 實體暫存器 | 384 int / 384 fp |
+| decode / execute 寬度 | 8 / 8 |
+| issue / commit 上限 | 8 / 8 |
+| memory issue / commit 上限 | 4 / 4 |
+| LSQ（requests / transfers / store buffer） | 4 / 4 / 8 |
 | 分支預測 | TAGE-SC-L 64KB |
 | L1I / L1D | 32 KB 8-way / 48 KB 12-way（lat 1/3 cycles） |
 | L2 | **私有** 2 MB 16-way（lat 15） |
 
-**E-core（Gracemont 級，`X86O3CPU`）— CPU 4–11**
+**E-core（窄管線）— CPU 4–11**
 
 | 參數 | 值 |
 |------|-----|
 | 時脈 | 2.8 GHz（獨立 clock domain） |
-| 管線寬度 | 4-wide |
-| ROB / IQ | 256 / 64 entries |
-| Load/Store Queue | 80 / 50 |
-| 實體暫存器 | 160 int / 160 fp |
+| decode / execute 寬度 | 4 / 4 |
+| issue / commit 上限 | 4 / 4 |
+| memory issue / commit 上限 | 2 / 2 |
+| LSQ（requests / transfers / store buffer） | 2 / 2 / 5 |
 | 分支預測 | TAGE-SC-L 8KB |
 | L1I / L1D | 64 KB 8-way / 32 KB 8-way |
 | L2 | **每 4 核 cluster 共享** 4 MB 16-way（lat 18），共 2 個 cluster |
 
 **Uncore**：共享 L3 16 MB 16-way（lat 42，mostly-exclusive）＋ DDR4-2400。
-此組態下 E/P 單執行緒算力比 α ≈ 0.45–0.55（頻率比 0.7 × 管線寬度/ROB 差），
+此組態下 E/P 單執行緒算力比 α ≈ 0.45–0.55（頻率比 0.7 × 管線寬度差），
 與實體 Raptor Lake 的 P/E 比相當；雙 E-cluster 共享 L2 正是機制二
 「E←E 竊取較便宜」的結構性依據。
 
@@ -205,12 +215,13 @@ barrier 密集特性）；fluidanimate 5 frames 輸出正常，E←E 82 次、�
 # CAWS 組環境變數: TBB_HETERO_PCORES=0-3  TBB_HETERO_STATS=1
 ```
 
-煙霧測試（`ws_bench` 縮小版）已確認：12 核異質系統開機正常、SE mode 多執行緒
-（clone/futex）正常、**CAWS 在 gem5 內正確啟用**（getcpu 分類成功、竊取統計輸出）；
-實測模擬速度 ≈ 176 KIPS。
+煙霧測試（`ws_bench` 縮小版）已確認：12 核異質系統 elaborate 正常、SE mode
+多執行緒（clone/futex）正常、**CAWS 在 gem5 內正確啟用**（getcpu 分類成功、
+竊取統計輸出）、模擬完整跑完無 assertion；實測模擬速度 ≈ 87 KIPS／組
+（四組同時跑，各佔一顆 host 核心）。
 
-**四組正式模擬（完整 simsmall）正在執行中**，預計 bodytrack ≈ 5–8 小時、
-fluidanimate ≈ 2–4 小時；完成後 `SUMMARY.txt` 的 `simSeconds` 將填入下表：
+**四組正式模擬（完整 simsmall）正在執行中**，預計 fluidanimate ≈ 5–8 小時、
+bodytrack ≈ 9–14 小時；完成後 `SUMMARY.txt` 的 `simSeconds` 將填入下表：
 
 | Benchmark（simsmall, 4P+8E） | 修改前 simSeconds | 修改後 simSeconds | 加速 | 預估（執行前） |
 |------|------|------|------|------|

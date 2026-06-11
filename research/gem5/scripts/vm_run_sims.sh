@@ -28,7 +28,7 @@ launch() { # $1 name, $2 variant, $3 cmd, $4 options
     if [[ $2 == caws ]]; then
         env_args=(--env TBB_HETERO_PCORES=0-$((NP-1)) --env TBB_HETERO_STATS=1)
     fi
-    nohup "$GEM5" --outdir "$out" "$CFG" --num-p $NP --num-e $NE \
+    setsid nohup "$GEM5" --outdir "$out" "$CFG" --num-p $NP --num-e $NE \
         --cmd "$3" --options "$4" "${env_args[@]}" > "$out/sim.log" 2>&1 &
     echo "launched $1_$2 (pid $!)"
 }
@@ -47,9 +47,11 @@ launch fluidanimate caws  "$BIN/bin_caws/fluidanimate"  "$FL_ARGS_C"
 
 # Waits for all four sims, prints the summary, then optionally powers off
 # so an unattended overnight run does not keep billing.
-nohup bash -c '
-wait_pids=$(pgrep -f hetero_pe_se.py || true)
-while pgrep -f hetero_pe_se.py > /dev/null; do sleep 60; done
+# NOTE: match by exact comm name (ps -C); a pgrep -f pattern would match this
+# watchdog's own command line and spin forever.
+setsid nohup bash -c '
+sleep 120   # let the sims pass elaboration before we start watching
+while [ "$(ps -C gem5.opt --no-headers | wc -l)" -gt 0 ]; do sleep 60; done
 {
   echo "==== gem5 simSeconds summary ($(date)) ===="
   for d in '"$RES"'/*/; do

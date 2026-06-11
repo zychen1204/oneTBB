@@ -38,48 +38,54 @@ from m5.objects import (
     TAGE_SC_L_64KB,
     TAGE_SC_L_8KB,
     VoltageDomain,
-    X86O3CPU,
+    X86MinorCPU,
 )
 
 # --------------------------------------------------------------------------
 # Core models
 # --------------------------------------------------------------------------
 
-class PCore(X86O3CPU):
-    """Performance core: Golden/Raptor-Cove-class wide OoO."""
-    fetchWidth = 8
-    decodeWidth = 8
-    renameWidth = 8
-    dispatchWidth = 8
-    issueWidth = 8
-    wbWidth = 8
-    commitWidth = 6
-    squashWidth = 6
-    numROBEntries = 1024
-    numIQEntries = 320
-    LQEntries = 256
-    SQEntries = 160
-    numPhysIntRegs = 384
-    numPhysFloatRegs = 384
+# NOTE: gem5's detailed OoO model (X86O3CPU) hits a TimeBuffer assertion deep
+# inside long PARSEC runs on some x86 micro-op sequences (it elaborates and runs
+# for a while, then panics). MinorCPU is gem5's robust detailed in-order pipeline
+# and does not exhibit this. We model the P/E asymmetry on MinorCPU via pipeline
+# width, frequency, cache topology and branch-predictor size — which is exactly
+# what CAWS's capacity-aware policy responds to (relative throughput, not OoO-ness;
+# real E / LITTLE cores are themselves narrow / in-order).
+
+class PCore(X86MinorCPU):
+    """Performance core: wide in-order pipeline @ 4.0 GHz."""
+    fetch1FetchLimit = 2
+    fetch2InputBufferSize = 8
+    decodeInputWidth = 8
+    decodeInputBufferSize = 12
+    executeInputWidth = 8
+    executeIssueLimit = 8
+    executeCommitLimit = 8
+    executeMemoryIssueLimit = 4
+    executeMemoryCommitLimit = 4
+    executeInputBufferSize = 12
+    executeLSQRequestsQueueSize = 4
+    executeLSQTransfersQueueSize = 4
+    executeLSQStoreBufferSize = 8
     branchPred = TAGE_SC_L_64KB()
 
 
-class ECore(X86O3CPU):
-    """Efficiency core: Gracemont-class narrow OoO."""
-    fetchWidth = 4
-    decodeWidth = 4
-    renameWidth = 4
-    dispatchWidth = 4
-    issueWidth = 4
-    wbWidth = 4
-    commitWidth = 4
-    squashWidth = 4
-    numROBEntries = 256
-    numIQEntries = 64
-    LQEntries = 80
-    SQEntries = 50
-    numPhysIntRegs = 160
-    numPhysFloatRegs = 160
+class ECore(X86MinorCPU):
+    """Efficiency core: narrow in-order pipeline @ 2.8 GHz (MinorCPU defaults-ish)."""
+    fetch1FetchLimit = 1
+    fetch2InputBufferSize = 4
+    decodeInputWidth = 4
+    decodeInputBufferSize = 6
+    executeInputWidth = 4
+    executeIssueLimit = 4
+    executeCommitLimit = 4
+    executeMemoryIssueLimit = 2
+    executeMemoryCommitLimit = 2
+    executeInputBufferSize = 7
+    executeLSQRequestsQueueSize = 2
+    executeLSQTransfersQueueSize = 2
+    executeLSQStoreBufferSize = 5
     branchPred = TAGE_SC_L_8KB()
 
 
