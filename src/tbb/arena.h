@@ -415,8 +415,10 @@ public:
     //! If necessary, raise a flag that there is new job in arena.
     template<arena::new_work_type work_type> void advertise_new_work();
 
-    //! Attempts to steal a task from a randomly chosen arena slot
-    d1::task* steal_task(unsigned arena_index, FastRandom& frnd, execution_data_ext& ed, isolation_type isolation);
+    //! Attempts to steal a task from a chosen arena slot.
+    /** Victim selection is random in stock mode; when the CAWS hetero policy is
+        enabled the choice is biased by the thief's core class (see arena.cpp). **/
+    d1::task* steal_task(thread_data& tls, execution_data_ext& ed, isolation_type isolation);
 
     //! Get a task from a global starvation resistant queue
     template<task_stream_accessor_type accessor>
@@ -526,48 +528,6 @@ void arena::advertise_new_work() {
 #endif
         request_workers(mandatory_delta, workers_delta, /* wakeup_threads = */ true);
     }
-}
-
-inline d1::task* arena::steal_task(unsigned arena_index, FastRandom& frnd, execution_data_ext& ed, isolation_type isolation) {
-    auto slot_num_limit = my_limit.load(std::memory_order_relaxed);
-    if (slot_num_limit == 1) {
-        // No slots to steal from
-        return nullptr;
-    }
-    // Try to steal a task from a random victim.
-    std::size_t k = frnd.get() % (slot_num_limit - 1);
-    // The following condition excludes the external thread that might have
-    // already taken our previous place in the arena from the list .
-    // of potential victims. But since such a situation can take
-    // place only in case of significant oversubscription, keeping
-    // the checks simple seems to be preferable to complicating the code.
-    if (k >= arena_index) {
-        ++k; // Adjusts random distribution to exclude self
-    }
-    arena_slot* victim = &my_slots[k];
-    d1::task **pool = victim->task_pool.load(std::memory_order_relaxed);
-    d1::task *t = nullptr;
-    if (pool == EmptyTaskPool || !(t = victim->steal_task(*this, isolation, k))) {
-        return nullptr;
-    }
-    if (task_accessor::is_proxy_task(*t)) {
-        task_proxy &tp = *(task_proxy*)t;
-        d1::slot_id slot = tp.slot;
-        t = tp.extract_task<task_proxy::pool_bit>();
-        if (!t) {
-            // Proxy was empty, so it's our responsibility to free it
-            tp.allocator.delete_object(&tp, ed);
-            return nullptr;
-        }
-        // Note affinity is called for any stolen task (proxy or general)
-        ed.affinity_slot = slot;
-    } else {
-        // Note affinity is called for any stolen task (proxy or general)
-        ed.affinity_slot = d1::any_slot;
-    }
-    // Update task owner thread id to identify stealing
-    ed.original_slot = k;
-    return t;
 }
 
 template<task_stream_accessor_type accessor>

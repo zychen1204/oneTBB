@@ -65,6 +65,7 @@ class mail_inbox;
 class mail_outbox;
 class market;
 class observer_proxy;
+class thread_data;
 
 enum task_stream_accessor_type { front_accessor = 0, back_nonnull_accessor };
 template<task_stream_accessor_type> class task_stream;
@@ -653,7 +654,7 @@ public:
     d1::task* get_stream_or_critical_task(execution_data_ext&, arena&, task_stream<front_accessor>&,
                                       unsigned& /*hint_for_stream*/, isolation_type,
                                       bool /*critical_allowed*/);
-    d1::task* steal_or_get_critical(execution_data_ext&, arena&, unsigned /*arena_index*/, FastRandom&,
+    d1::task* steal_or_get_critical(execution_data_ext&, arena&, thread_data&,
                                 isolation_type, bool /*critical_allowed*/);
 
 #if __TBB_RESUMABLE_TASKS

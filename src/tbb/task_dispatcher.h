@@ -164,10 +164,10 @@ inline d1::task* task_dispatcher::get_stream_or_critical_task(
 }
 
 inline d1::task* task_dispatcher::steal_or_get_critical(
-    execution_data_ext& ed, arena& a, unsigned arena_index, FastRandom& random,
+    execution_data_ext& ed, arena& a, thread_data& tls,
     isolation_type isolation, bool critical_allowed)
 {
-    if (d1::task* t = a.steal_task(arena_index, random, ed, isolation)) {
+    if (d1::task* t = a.steal_task(tls, ed, isolation)) {
         ed.context = task_accessor::context(*t);
         ed.isolation = task_accessor::isolation(*t);
         return get_critical_task(t, ed, isolation, critical_allowed);
@@ -186,7 +186,6 @@ d1::task* task_dispatcher::receive_or_steal_task(
     // Get tls data (again)
     arena& a = *tls.my_arena;
     arena_slot& slot = *tls.my_arena_slot;
-    unsigned arena_index = tls.my_arena_index;
     mail_inbox& inbox = tls.my_inbox;
     task_stream<front_accessor>& resume_stream = a.my_resume_task_stream;
     unsigned& resume_hint = slot.hint_for_resume_stream;
@@ -198,6 +197,16 @@ d1::task* task_dispatcher::receive_or_steal_task(
     inbox.set_is_idle(true);
 
     bool stealing_is_allowed = can_steal();
+
+    if (hetero_topology::enabled()) {
+        // Refresh the cached core class once per stealing session: unpinned
+        // threads may have been migrated by the OS since the last check.
+        if (!(tls.my_is_worker && hetero_topology::pinning_enabled())) {
+            tls.my_core_class = hetero_topology::classify_current();
+            slot.set_core_class(tls.my_core_class);
+        }
+        tls.my_hetero_patience = 0;
+    }
 
     // Stealing loop mailbox/enqueue/other_slots
     for (;;) {
@@ -226,7 +235,7 @@ d1::task* task_dispatcher::receive_or_steal_task(
             // Checked if there are tasks in starvation-resistant stream. Only allowed at the outermost dispatch level without isolation.
         }
         else if (stealing_is_allowed
-                 && (t = steal_or_get_critical(ed, a, arena_index, tls.my_random, isolation, critical_allowed))) {
+                 && (t = steal_or_get_critical(ed, a, tls, isolation, critical_allowed))) {
             // Stole a task from a random arena slot
         }
         else {

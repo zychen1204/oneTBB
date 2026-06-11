@@ -23,6 +23,7 @@ add_library(tbb
     exception.cpp
     governor.cpp
     global_control.cpp
+    hetero.cpp
     itt_notify.cpp
     main.cpp
     market.cpp

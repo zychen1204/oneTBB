@@ -28,6 +28,7 @@
 #include "misc.h"
 #include "mailbox.h"
 #include "scheduler_common.h"
+#include "hetero.h"
 
 #include <atomic>
 
@@ -59,6 +60,10 @@ struct alignas(max_nfs_size) arena_slot_shared_state {
     //! Index of the first ready task in the deque.
     /** Modified by thieves, and by the owner during compaction/reallocation **/
     std::atomic<std::size_t> head;
+
+    //! Core class (P/E) of the thread currently attached to the slot.
+    /** Written by the owner, read (relaxed) by thieves as a CAWS scheduling hint. **/
+    std::atomic<std::uint8_t> my_core_class;
 };
 
 struct alignas(max_nfs_size) arena_slot_private_state {
@@ -177,6 +182,25 @@ public:
 
     bool is_occupied() const {
         return my_is_occupied.load(std::memory_order_relaxed);
+    }
+
+    void set_core_class(core_class c) {
+        my_core_class.store((std::uint8_t)c, std::memory_order_relaxed);
+    }
+
+    core_class get_core_class() const {
+        return (core_class)my_core_class.load(std::memory_order_relaxed);
+    }
+
+    //! Approximate number of ready tasks in the deque.
+    /** Heuristic only: head/tail may be transiently inconsistent during pool
+        relocations, so the result must never be used for correctness decisions.
+        steal_task() re-validates everything under the task pool lock. **/
+    std::size_t approx_depth() const {
+        if (task_pool.load(std::memory_order_relaxed) == EmptyTaskPool) return 0;
+        std::size_t h = head.load(std::memory_order_relaxed);
+        std::size_t t = tail.load(std::memory_order_relaxed);
+        return (std::intptr_t)t > (std::intptr_t)h ? t - h : 0;
     }
 
     task_dispatcher& default_task_dispatcher() {

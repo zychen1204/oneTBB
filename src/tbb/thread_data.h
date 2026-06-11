@@ -30,6 +30,7 @@
 #include "misc.h" // FastRandom
 #include "small_object_pool_impl.h"
 #include "intrusive_list.h"
+#include "hetero.h"
 
 #include <atomic>
 
@@ -167,6 +168,14 @@ public:
     //! The random generator
     FastRandom my_random;
 
+    //! Core class (P/E) of the CPU this thread runs on, cached for CAWS decisions.
+    /** Refreshed on arena attach and at the start of every stealing session. **/
+    core_class my_core_class{core_class::unknown};
+
+    //! Number of consecutive steal rounds an E-thief has declined in the current
+    //! stealing session (CAWS endgame throttle anti-starvation counter).
+    unsigned my_hetero_patience{0};
+
     //! Last observer in the observers list processed on this slot
     observer_proxy* my_last_observer;
 
@@ -213,6 +222,14 @@ inline void thread_data::attach_arena(arena& a, std::size_t index) {
     my_arena_slot = a.my_slots + index;
     // Read the current slot mail_outbox and attach it to the mail_inbox (remove inbox later maybe)
     my_inbox.attach(my_arena->mailbox(index));
+    if (hetero_topology::enabled()) {
+        if (my_is_worker && hetero_topology::pinning_enabled()) {
+            my_core_class = hetero_topology::pin_current_thread(static_cast<unsigned>(index));
+        } else {
+            my_core_class = hetero_topology::classify_current();
+        }
+        my_arena_slot->set_core_class(my_core_class);
+    }
 }
 
 inline bool thread_data::is_attached_to(arena* a) { return my_arena == a; }

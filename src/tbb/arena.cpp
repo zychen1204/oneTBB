@@ -187,6 +187,104 @@ std::uintptr_t arena::calculate_stealing_threshold() {
     return r1::calculate_stealing_threshold(reinterpret_cast<std::uintptr_t>(&anchor), my_threading_control->worker_stack_size());
 }
 
+d1::task* arena::steal_task(thread_data& tls, execution_data_ext& ed, isolation_type isolation) {
+    auto slot_num_limit = my_limit.load(std::memory_order_relaxed);
+    if (slot_num_limit == 1) {
+        // No slots to steal from
+        return nullptr;
+    }
+    const unsigned arena_index = tls.my_arena_index;
+    // Try to steal a task from a random victim.
+    std::size_t k = tls.my_random.get() % (slot_num_limit - 1);
+    // The following condition excludes the external thread that might have
+    // already taken our previous place in the arena from the list .
+    // of potential victims. But since such a situation can take
+    // place only in case of significant oversubscription, keeping
+    // the checks simple seems to be preferable to complicating the code.
+    if (k >= arena_index) {
+        ++k; // Adjusts random distribution to exclude self
+    }
+
+    if (hetero_topology::enabled()) {
+        // ------------------- CAWS victim selection -------------------
+        // One relaxed pass over the visible slots estimates the amount of
+        // pending work and finds the deepest deque per victim class. The
+        // snapshot is heuristic only: arena_slot::steal_task() re-validates
+        // everything under the victim's task pool lock.
+        constexpr std::size_t none = ~std::size_t(0);
+        std::size_t pending = 0;
+        std::size_t best = none, best_depth = 0;     // deepest deque overall
+        std::size_t best_e = none, best_e_depth = 0; // deepest E-core-owned deque
+        // Scan from a random start so equal-depth victims are picked uniformly
+        // and concurrent thieves do not all converge on the same slot.
+        for (std::size_t n = 0; n < slot_num_limit; ++n) {
+            std::size_t i = k + n;
+            if (i >= slot_num_limit) i -= slot_num_limit;
+            if (i == arena_index) continue;
+            std::size_t d = my_slots[i].approx_depth();
+            if (!d) continue;
+            pending += d;
+            if (d > best_depth) { best_depth = d; best = i; }
+            if (my_slots[i].get_core_class() == core_class::efficiency && d > best_e_depth) {
+                best_e_depth = d; best_e = i;
+            }
+        }
+        if (best != none) {
+            if (tls.my_core_class == core_class::efficiency) {
+                if (pending <= hetero_topology::endgame_threshold()
+                    && tls.my_hetero_patience < hetero_topology::patience()) {
+                    // Endgame: the few remaining tasks complete sooner on P-cores,
+                    // so this E-thief stands down. The patience counter bounds the
+                    // stand-down in case all P-cores stay busy with long tasks.
+                    ++tls.my_hetero_patience;
+                    hetero_topology::note_endgame_decline();
+                    return nullptr;
+                }
+                tls.my_hetero_patience = 0;
+                // Prefer an E-core victim: its deque holds tasks already deemed
+                // E-sized, and E-core clusters share an L2, so the migration is
+                // cheaper than pulling a coarse subtree out of a P-core deque.
+                k = (best_e != none) ? best_e : best;
+            } else {
+                // P-core (or unclassified) thief: steal from the deepest deque to
+                // maximize work obtained per steal and to drain backlogs queued
+                // behind slower cores.
+                k = best;
+            }
+        }
+        // If no work is visible, keep the original random pick: the snapshot is
+        // racy and the locked steal attempt may still succeed.
+    }
+
+    arena_slot* victim = &my_slots[k];
+    d1::task **pool = victim->task_pool.load(std::memory_order_relaxed);
+    d1::task *t = nullptr;
+    if (pool == EmptyTaskPool || !(t = victim->steal_task(*this, isolation, k))) {
+        return nullptr;
+    }
+    if (hetero_topology::stats_enabled()) {
+        hetero_topology::note_steal(tls.my_core_class, victim->get_core_class());
+    }
+    if (task_accessor::is_proxy_task(*t)) {
+        task_proxy &tp = *(task_proxy*)t;
+        d1::slot_id slot = tp.slot;
+        t = tp.extract_task<task_proxy::pool_bit>();
+        if (!t) {
+            // Proxy was empty, so it's our responsibility to free it
+            tp.allocator.delete_object(&tp, ed);
+            return nullptr;
+        }
+        // Note affinity is called for any stolen task (proxy or general)
+        ed.affinity_slot = slot;
+    } else {
+        // Note affinity is called for any stolen task (proxy or general)
+        ed.affinity_slot = d1::any_slot;
+    }
+    // Update task owner thread id to identify stealing
+    ed.original_slot = k;
+    return t;
+}
+
 void arena::process(thread_data& tls) {
     governor::set_thread_data(tls); // TODO: consider moving to create_one_job.
     __TBB_ASSERT( is_alive(my_guard), nullptr);
@@ -277,6 +375,7 @@ arena::arena(threading_control* control, unsigned num_slots, unsigned num_reserv
         my_slots[i].init_task_streams(i);
         my_slots[i].my_default_task_dispatcher = new(base_td_pointer + i) task_dispatcher(this);
         my_slots[i].my_is_occupied.store(false, std::memory_order_relaxed);
+        my_slots[i].set_core_class(core_class::unknown);
     }
     my_fifo_task_stream.initialize(my_num_slots);
     my_resume_task_stream.initialize(my_num_slots);
