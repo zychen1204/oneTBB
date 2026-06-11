@@ -53,14 +53,14 @@ class PCore(X86O3CPU):
     dispatchWidth = 8
     issueWidth = 8
     wbWidth = 8
-    commitWidth = 8
-    squashWidth = 8
-    numROBEntries = 512
-    numIQEntries = 200
-    LQEntries = 192
-    SQEntries = 114
-    numPhysIntRegs = 280
-    numPhysFloatRegs = 288
+    commitWidth = 6
+    squashWidth = 6
+    numROBEntries = 1024
+    numIQEntries = 320
+    LQEntries = 256
+    SQEntries = 160
+    numPhysIntRegs = 384
+    numPhysFloatRegs = 384
     branchPred = TAGE_SC_L_64KB()
 
 

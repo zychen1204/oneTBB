@@ -32,15 +32,14 @@
    環境變數 `TBB_HETERO_PCORES` 取得 P/E 對應；`TBB_HETERO_PIN=1` 時 worker 依
    slot 順序 P-core 優先釘選。
 
-**結果摘要**（正式評估環境為 gem5 模擬的 4P+8E 異質系統，詳見 §5）：
+**結果摘要**（正式評估環境為 gem5 模擬的 **4P+8E（12 核）異質系統**，兩個 benchmark
+跑在同一台模擬機器上，差別只在 benchmark 自己開幾條 worker thread，詳見 §5）：
 
-| 場景 | 修改前（stock） | 修改後（CAWS） | 加速 |
-|------|------|------|------|
-| gem5 bodytrack simsmall（4P+8E，模擬執行中） | 待填 | 待填 | 預估 +8 ~ +15% |
-| gem5 fluidanimate simsmall（4P+8E，模擬執行中） | 待填 | 待填 | 預估 +5 ~ +12% |
+| 場景 | worker threads | 修改前（stock） | 修改後（CAWS） | 加速 |
+|------|------|------|------|------|
+| gem5 bodytrack simsmall | 12（用滿 4P+8E） | 待填 | 待填 | 預估 +8 ~ +15% |
+| gem5 fluidanimate simsmall | 8（用 4P+4E；受 2 冪次分解限制） | 待填 | 待填 | 預估 +5 ~ +12% |
 
-正確性：`parallel_for` / `parallel_reduce` / 巢狀 `task_group` 全數通過，
-含 `TBB_USE_ASSERT=1` 的除錯版（scheduler 內部不變量全部成立）。
 政策關閉（非異質機器、或 `TBB_HETERO_DISABLE=1`）時行為與原版 **逐位元相同路徑**，無額外開銷。
 
 ---
@@ -110,17 +109,6 @@ P-core 數時，這些任務由 P-core 消化必定更快結束；E-core 搶走�
 - `TBB_HETERO_PIN=1`：worker 依 slot index 釘選，P-core 優先（slot 越小越先拿到
   P-core），讓實驗具決定性、消除 OS 遷移雜訊。
 
-### 2.3 正確性論證
-
-- 掃描得到的 `pending`、deque 深度、slot 類別 **全部只是 heuristic**：
-  實際竊取仍走原本的 `arena_slot::steal_task()`，在受害者 task pool 鎖內重新驗證
-  head/tail，因此不可能偷到不存在的任務或破壞 deque 不變量。
-- E-core「放棄竊取」回傳 `nullptr`，與原版「隨機選中空 deque」走完全相同的失敗路徑；
-  TBB 的語義是 *允許* 平行而非 *保證* 平行，外加 patience 上界，故不影響前進性
-  （`TBB_USE_ASSERT` 除錯版完整驗證通過）。
-- 政策只在 `hetero_topology::enabled()` 時啟動；停用時唯一的差異是
-  `steal_task` 從 header inline 移到 `arena.cpp`（slow path，無量測得到的影響）。
-
 ---
 
 ## 3. 修改了什麼
@@ -152,32 +140,14 @@ Branch：`oneTBB` repo 的 `caws`（`git diff master..caws`）。
 
 ---
 
-## 4. 正確性驗證
-
-效能數據一律以 §5 的 gem5 正式環境為準；本節僅列功能與正確性驗證（原生執行，
-微基準 `bench/ws_bench.cpp` 的 verify 模式 + PARSEC 輸出檢查）：
-
-| 測試 | stock | CAWS | CAWS+ASSERT 除錯版 |
-|------|------|------|------|
-| `parallel_for` 逐元素比對序列參考 | PASS | PASS | PASS |
-| `parallel_reduce` 數值比對 | PASS | PASS | PASS |
-| 巢狀 `task_group` 遞迴 fib(30) | PASS | PASS | PASS |
-| 關閉路徑（`DISABLE=1` / 非 hybrid sysfs） | — | PASS | PASS |
-
-`TBB_USE_ASSERT=1` 除錯版完整通過代表修改未破壞 scheduler 內部不變量。
-另以 `TBB_HETERO_STATS=1` 確認三個機制都實際觸發（E←E 竊取占 E 小偷的多數、
-終局退讓計數隨 barrier 密度上升），詳見 §5.2 的 PARSEC 功能驗證。
-
----
-
-## 5. gem5 模擬
+## 4. gem5 模擬
 
 實際執行環境：**GCP `c3-highcpu-8`**（Xeon 8481C Sapphire Rapids、8 vCPU、50GB）、
 **gem5 v24.0.0.0**、SE mode。流程腳本：`gem5/scripts/vm_build_static.sh`（兩版靜態
 libtbb.a + 四個靜態 benchmark）、`gem5/scripts/vm_run_sims.sh`（四組模擬同時執行，
 完成後自動產出 `SUMMARY.txt` 並關機）；細節見 `gem5/README.md`。
 
-### 5.1 模擬系統規格（4P + 8E，Raptor-Lake-like，1P:2E 核心比）
+### 4.1 模擬系統規格（4P + 8E，Raptor-Lake-like，1P:2E 核心比）
 
 **P-core（Golden/Raptor Cove 級，`X86O3CPU`）— CPU 0–3**
 
@@ -210,7 +180,7 @@ libtbb.a + 四個靜態 benchmark）、`gem5/scripts/vm_run_sims.sh`（四組模
 與實體 Raptor Lake 的 P/E 比相當；雙 E-cluster 共享 L2 正是機制二
 「E←E 竊取較便宜」的結構性依據。
 
-### 5.2 PARSEC 3.0 的 oneTBB 移植（`parsec-ports/`）
+### 4.2 PARSEC 3.0 的 oneTBB 移植（`parsec-ports/`）
 
 PARSEC 3.0 的 TBB 程式碼以 2008 年的 TBB API 撰寫，已完成移植並通過功能驗證：
 
@@ -225,7 +195,7 @@ PARSEC 3.0 的 TBB 程式碼以 2008 年的 TBB API 撰寫，已完成移植並�
 poses.txt 數值正常，竊取統計 E←E 205 次、終局退讓 772 次（證實 bodytrack 的
 barrier 密集特性）；fluidanimate 5 frames 輸出正常，E←E 82 次、終局退讓 74 次。
 
-### 5.3 執行指令與模擬數據
+### 4.3 執行指令與模擬數據
 
 ```bash
 # VM 端一鍵執行（四組同時；simsmall = 1000 粒子 5 層 / 5 frames）
@@ -256,17 +226,12 @@ fluidanimate 的空間網格較規則、每 phase 不平衡度較低，效益預
 
 ---
 
-## 6. 限制與未來工作
+## 5. 限制與未來工作
 
-1. **gem5 模擬單次執行**：§5.3 的四組模擬為單次執行（gem5 為確定性模擬，
-   同設定重跑結果相同，但不同輸入/參數的敏感度掃描尚未進行）；統計嚴謹性
-   （提案 §6.4-A 的 30 次重複）適用於原生實驗而非確定性模擬。
-2. **喚醒順序仍是同質的**：CAWS 只改了「誰偷誰」，沒改「先叫醒誰」。讓 arena 在
+1. **喚醒順序仍是同質的**：CAWS 只改了「誰偷誰」，沒改「先叫醒誰」。讓 arena 在
    平行餘裕少時優先喚醒 P-core worker（修改 `private_server` 的 LIFO 喚醒序）是
    下一個自然延伸。
-3. **任務大小註記**：若在 `parallel_for` partitioner 層傳遞範圍大小到 task，
+2. **任務大小註記**：若在 `parallel_for` partitioner 層傳遞範圍大小到 task，
    可把 endgame 的全域近似升級回提案原始的 per-task `W(t) ≤ κ·CW·W̄` 條件。
-4. **α 的動態校準**：目前 P/E 只有類別之分；可在執行期以每核 task 吞吐量回歸出
+3. **α 的動態校準**：目前 P/E 只有類別之分；可在執行期以每核 task 吞吐量回歸出
    連續的 `CW(c)`，支援超過兩級的異質性（如 Lunar Lake 的 LP-E core）。
-5. **能耗指標**：終局退讓讓 E-core 在收尾時進入暫停/睡眠，預期同時改善
-   GFLOPS/Watt（提案 §4.3），需以 RAPL（實機）或 gem5 McPAT 流程驗證。
