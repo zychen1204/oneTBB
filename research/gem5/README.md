@@ -10,7 +10,8 @@ bodytrack / fluidanimate 的效益。實際執行環境：GCP `c3-highcpu-8`
 |---|---|---|
 | 模型 | X86O3CPU，8-wide | X86O3CPU，4-wide |
 | 時脈 | 4.0 GHz | 2.8 GHz |
-| ROB / IQ | 512 / 200 | 256 / 64 |
+| ROB / IQ | 1024 / 320 | 256 / 64 |
+| commit/squash width | 6-wide | 4-wide |
 | L1I / L1D | 32K / 48K | 64K / 32K |
 | L2 | 私有 2 MB | **每 4 核 cluster 共享 4 MB**（共 2 個 cluster） |
 | 分支預測 | TAGE-SC-L 64KB | TAGE-SC-L 8KB |

@@ -154,10 +154,10 @@ libtbb.a + 四個靜態 benchmark）、`gem5/scripts/vm_run_sims.sh`（四組模
 | 參數 | 值 |
 |------|-----|
 | 時脈 | 4.0 GHz（獨立 clock domain） |
-| 管線寬度 | 8-wide fetch/decode/rename/issue/commit |
-| ROB / IQ | 512 / 200 entries |
-| Load/Store Queue | 192 / 114 |
-| 實體暫存器 | 280 int / 288 fp |
+| 管線寬度 | 8-wide fetch/decode/rename，6-wide commit/squash |
+| ROB / IQ | 1024 / 320 entries |
+| Load/Store Queue | 256 / 160 |
+| 實體暫存器 | 384 int / 384 fp |
 | 分支預測 | TAGE-SC-L 64KB |
 | L1I / L1D | 32 KB 8-way / 48 KB 12-way（lat 1/3 cycles） |
 | L2 | **私有** 2 MB 16-way（lat 15） |
