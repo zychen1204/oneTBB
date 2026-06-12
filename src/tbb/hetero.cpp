@@ -26,10 +26,36 @@
 #if defined(__linux__)
 #include <sched.h>
 #include <unistd.h>
+#include <sys/syscall.h>
 #define __TBB_HETERO_PLATFORM 1
 #else
 #define __TBB_HETERO_PLATFORM 0
 #endif
+
+namespace {
+#if defined(__linux__) && defined(SYS_getcpu)
+// Returns the CPU the calling thread runs on, or -1.
+//
+// We deliberately avoid glibc's sched_getcpu(): on glibc >= 2.35 it reads the
+// CPU id from the rseq area (a per-thread cache the kernel keeps current). That
+// is fast on real hardware, but under a simulator whose SE mode ignores the
+// rseq registration syscall (e.g. gem5), the cached id is never updated and
+// every thread reports CPU 0 -- which silently collapses all P/E classification
+// to "performance". Issuing the raw getcpu syscall bypasses the rseq cache and
+// is correct on real hardware and on simulators that implement getcpu.
+inline int tbb_raw_getcpu() {
+    unsigned cpu = 0;
+    long r = ::syscall(SYS_getcpu, &cpu, nullptr, nullptr);
+    if (r != 0) {
+        int s = ::sched_getcpu(); // fall back if getcpu is unavailable
+        return s;
+    }
+    return static_cast<int>(cpu);
+}
+#elif defined(__linux__)
+inline int tbb_raw_getcpu() { return ::sched_getcpu(); }
+#endif
+} // anonymous namespace
 
 namespace tbb {
 namespace detail {
@@ -210,7 +236,7 @@ core_class hetero_topology::classify(int cpu) {
 
 core_class hetero_topology::classify_current() {
 #if __TBB_HETERO_PLATFORM
-    return classify(sched_getcpu());
+    return classify(tbb_raw_getcpu());
 #else
     return core_class::unknown;
 #endif
