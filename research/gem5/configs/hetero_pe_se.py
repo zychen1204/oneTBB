@@ -1,11 +1,12 @@
 # gem5 SE-mode configuration: heterogeneous P-core / E-core x86 system
 # for evaluating the CAWS oneTBB patch with PARSEC 3.0 (bodytrack, fluidanimate).
 #
-# Topology (default 4P + 8E, Raptor-Lake-like with the 1P:2E core ratio):
+# Topology (default 4P + 12E = 16 cores, 1P:3E ratio; total is a power of two
+# so fluidanimate's power-of-two thread count can occupy every core):
 #
-#   P0..P3 : 8-wide OoO @ 4.0 GHz, private L1I 32K / L1D 48K / L2 2M
-#   E0..E7 : 4-wide OoO @ 2.8 GHz, private L1I 64K / L1D 32K,
-#            one 4 MB L2 shared per 4-core E-cluster (2 clusters)
+#   P0..P3  : wide MinorCPU @ 4.0 GHz, private L1I 32K / L1D 48K / L2 2M
+#   E0..E11 : narrow MinorCPU @ 2.8 GHz, private L1I 64K / L1D 32K,
+#             one 4 MB L2 shared per 4-core E-cluster (3 clusters)
 #   shared L3 16 MB + DDR4-2400
 #
 # CPU ids: 0..num_p-1 are P-cores, num_p..num_p+num_e-1 are E-cores,
@@ -168,7 +169,9 @@ parser.add_argument("--options", default="", help="argv passed to the binary")
 parser.add_argument("--env", action="append", default=[],
                     help="environment entry VAR=VALUE (repeatable)")
 parser.add_argument("--num-p", type=int, default=4)
-parser.add_argument("--num-e", type=int, default=8)
+# Default 12 E-cores -> 16 total, a power of two so fluidanimate (which requires
+# a power-of-two thread count) can use every core; bodytrack uses all 16 too.
+parser.add_argument("--num-e", type=int, default=12)
 parser.add_argument("--p-clock", default="4GHz")
 parser.add_argument("--e-clock", default="2.8GHz")
 parser.add_argument("--mem-size", default="4GB")
@@ -194,17 +197,28 @@ system.mem_ranges = [AddrRange(args.mem_size)]
 system.cpu = [PCore(cpu_id=i) for i in range(args.num_p)] + \
              [ECore(cpu_id=args.num_p + i) for i in range(args.num_e)]
 
+# Coherent crossbars carry a snoop filter whose default capacity (8 MB worth of
+# blocks) is smaller than this hierarchy's total cached data (L3 16 MB + per-P
+# 2 MB L2s + per-cluster 4 MB L2s). A working set that fills the caches then
+# overflows the filter and panics ("snoop filter exceeded capacity"). Size every
+# crossbar's filter to comfortably exceed the aggregate cache.
+def widen_snoop_filter(xbar):
+    xbar.snoop_filter.max_capacity = "128MB"
+
 system.membus = SystemXBar()
 system.l3bus = L2XBar()
+widen_snoop_filter(system.membus)
+widen_snoop_filter(system.l3bus)
 system.l3 = L3()
 system.l3.cpu_side = system.l3bus.mem_side_ports
 system.l3.mem_side = system.membus.cpu_side_ports
 
-# Shared L2 per 4-core E-cluster (e.g. 8 E-cores -> 2 clusters).
+# Shared L2 per 4-core E-cluster (e.g. 12 E-cores -> 3 clusters).
 num_clusters = (args.num_e + 3) // 4
 system.e_l2bus = [L2XBar() for _ in range(num_clusters)]
 system.e_l2 = [EL2() for _ in range(num_clusters)]
 for bus, l2 in zip(system.e_l2bus, system.e_l2):
+    widen_snoop_filter(bus)
     l2.cpu_side = bus.mem_side_ports
     l2.mem_side = system.l3bus.cpu_side_ports
 
@@ -220,6 +234,7 @@ for i, cpu in enumerate(system.cpu):
     if is_p:
         # Private L2 behind a per-core bus.
         cpu.l2bus = L2XBar()
+        widen_snoop_filter(cpu.l2bus)
         cpu.l2 = PL2()
         cpu.icache.mem_side = cpu.l2bus.cpu_side_ports
         cpu.dcache.mem_side = cpu.l2bus.cpu_side_ports

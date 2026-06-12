@@ -6,7 +6,7 @@ bodytrack / fluidanimate 的效益。實際執行環境：GCP `c3-highcpu-8`
 
 ## 模擬系統（`configs/hetero_pe_se.py`，預設值）
 
-| | P-core ×4（CPU 0–3） | E-core ×8（CPU 4–11） |
+| | P-core ×4（CPU 0–3） | E-core ×12（CPU 4–15） |
 |---|---|---|
 | 模型 | X86MinorCPU，寬管線 | X86MinorCPU，窄管線 |
 | 時脈 | 4.0 GHz | 2.8 GHz |
@@ -14,11 +14,12 @@ bodytrack / fluidanimate 的效益。實際執行環境：GCP `c3-highcpu-8`
 | issue/commit limit | 8 / 8 | 4 / 4 |
 | LSQ store buffer | 8 | 5 |
 | L1I / L1D | 32K / 48K | 64K / 32K |
-| L2 | 私有 2 MB | **每 4 核 cluster 共享 4 MB**（共 2 個 cluster） |
+| L2 | 私有 2 MB | **每 4 核 cluster 共享 4 MB**（共 3 個 cluster） |
 | 分支預測 | TAGE-SC-L 64KB | TAGE-SC-L 8KB |
 
 Uncore：共享 L3 16 MB + DDR4-2400。CPU 編號 0–3 為 P-core，
-與 workload 環境變數 `TBB_HETERO_PCORES=0-3` 一致。
+與 workload 環境變數 `TBB_HETERO_PCORES=0-3` 一致。總核心數 16（2 的冪次）
+讓需要 2 冪次執行緒數的 fluidanimate 也能用滿全部 16 核。
 
 > **為何用 MinorCPU 而非 O3**：gem5 的詳細亂序模型 `X86O3CPU` 在長時間 PARSEC
 > 模擬中會於某些 x86 微指令序列觸發 TimeBuffer assertion（能 elaborate、跑一段
@@ -100,8 +101,8 @@ PARSEC 3.0 的 TBB 程式碼用了 oneTBB 已移除的 API，移植內容：
 - gem5 SE 依 `clone()` 順序把執行緒放到閒置 CPU；TBB runtime 透過 `getcpu`
   syscall 分類執行緒（煙霧測試已驗證 v24 SE 可用）。**不要設** `TBB_HETERO_PIN`
   （SE 不支援 affinity 遷移）。
-- 模擬速度實測約 **87 KIPS／組**（c3-highcpu-8，12 個 MinorCPU 模擬核心）；
-  fluidanimate simsmall 約 5–8 小時、bodytrack simsmall 約 9–14 小時，
+- 模擬速度實測約 **65–75 KIPS／組**（c3-highcpu-8，16 個 MinorCPU 模擬核心）；
+  fluidanimate simsmall 約 7–10 小時、bodytrack simsmall 約 12–16 小時，
   四組可同時跑（gem5 單執行緒，8 vCPU 足夠）。
 - 長時間模擬務必經由 `vm_run_sims.sh` 啟動（內部用 `setsid nohup`）：
   以 `gcloud compute ssh --command` 直接 `nohup` 啟動時，SSH 異常斷線的

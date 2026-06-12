@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # VM-side: launches the four production gem5 simulations concurrently
-# (bodytrack/fluidanimate x stock/CAWS) on the 4P+8E hetero system.
+# (bodytrack/fluidanimate x stock/CAWS) on the 4P+12E hetero system.
 #
 # usage: vm_run_sims.sh <bt_particles> <bt_layers> <fl_frames> [poweroff]
 #   e.g. vm_run_sims.sh 1000 5 5 poweroff     # full simsmall
@@ -17,7 +17,8 @@ BIN=$HOME/static
 RES=$HOME/results
 BT_IN=$HOME/parsec-inputs/bodytrack/data-small/sequenceB_1
 FL_IN=$HOME/parsec-inputs/fluidanimate/data-small/in_35K.fluid
-NP=4; NE=8; THREADS=$((NP+NE))
+# 4P + 12E = 16 cores; 16 is a power of two so fluidanimate uses every core.
+NP=4; NE=12; THREADS=$((NP+NE))
 
 mkdir -p "$RES"
 
@@ -36,8 +37,8 @@ launch() { # $1 name, $2 variant, $3 cmd, $4 options
 # bodytrack args: <dataset> <cameras> <frames> <particles> <layers> <threadmodel:1=TBB> <threads>
 BT_ARGS="$BT_IN 4 1 $BT_PARTICLES $BT_LAYERS 1 $THREADS"
 # fluidanimate args: <threads(pow2)> <frames> <input> <output>
-FL_ARGS_S="8 $FL_FRAMES $FL_IN $RES/fluidanimate_stock/out.fluid"
-FL_ARGS_C="8 $FL_FRAMES $FL_IN $RES/fluidanimate_caws/out.fluid"
+FL_ARGS_S="$THREADS $FL_FRAMES $FL_IN $RES/fluidanimate_stock/out.fluid"
+FL_ARGS_C="$THREADS $FL_FRAMES $FL_IN $RES/fluidanimate_caws/out.fluid"
 
 mkdir -p "$RES/fluidanimate_stock" "$RES/fluidanimate_caws"
 launch bodytrack stock "$BIN/bin_stock/bodytrack" "$BT_ARGS"

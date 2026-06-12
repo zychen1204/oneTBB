@@ -35,13 +35,13 @@
    環境變數 `TBB_HETERO_PCORES` 取得 P/E 對應；`TBB_HETERO_PIN=1` 時 worker 依
    slot 順序 P-core 優先釘選。
 
-**結果摘要**（正式評估環境為 gem5 模擬的 **4P+8E（12 核）異質系統**，兩個 benchmark
-跑在同一台模擬機器上，差別只在 benchmark 自己開幾條 worker thread，詳見 §5）：
+**結果摘要**（正式評估環境為 gem5 模擬的 **4P+12E（16 核）異質系統**，總核心數取
+2 的冪次，讓需要 2 冪次執行緒數的 fluidanimate 也能用滿每一顆核心，詳見 §5）：
 
 | 場景 | worker threads | 修改前（stock） | 修改後（CAWS） | 加速 |
 |------|------|------|------|------|
-| gem5 bodytrack simsmall | 12（用滿 4P+8E） | 待填 | 待填 | 預估 +8 ~ +15% |
-| gem5 fluidanimate simsmall | 8（用 4P+4E；受 2 冪次分解限制） | 待填 | 待填 | 預估 +5 ~ +12% |
+| gem5 bodytrack simsmall | 16（用滿 4P+12E） | 待填 | 待填 | 預估 +8 ~ +15% |
+| gem5 fluidanimate simsmall | 16（用滿 4P+12E） | 待填 | 待填 | 預估 +5 ~ +12% |
 
 政策關閉（非異質機器、或 `TBB_HETERO_DISABLE=1`）時行為與原版 **逐位元相同路徑**，無額外開銷。
 
@@ -106,9 +106,13 @@ P-core 數時，這些任務由 P-core 消化必定更快結束；E-core 搶走�
 - 拓樸來源（優先序）：`TBB_HETERO_PCORES=<cpulist>` 環境變數（gem5 / 虛擬化用）→
   Intel hybrid sysfs（`/sys/devices/cpu_core/cpus`、`cpu_atom`）→ ARM
   `cpu_capacity`。找不到不對稱拓樸 ⇒ 整套機制關閉，行為等同原版。
-- 每條執行緒在進入 arena 及 **每次竊取 session 開始** 時以 `sched_getcpu()`
-  重新分類自己（OS 可能遷移執行緒），寫入 arena slot 的 8-bit atomic 標籤，
-  小偷以 relaxed load 讀取受害者類別。
+- 每條執行緒在進入 arena 及 **每次竊取 session 開始** 時用 **原始 `getcpu`
+  syscall** 重新分類自己（OS 可能遷移執行緒），寫入 arena slot 的 8-bit atomic
+  標籤，小偷以 relaxed load 讀取受害者類別。
+  > 註：刻意避開 glibc 的 `sched_getcpu()`——glibc ≥ 2.35 它從 rseq 快取讀
+  > CPU id，而 gem5 SE mode 忽略 rseq 註冊 syscall，導致該快取永不更新、每條
+  > 執行緒都讀到 CPU 0，使 P/E 分類全部塌縮成 P-core（CAWS 形同停用）。直接下
+  > `getcpu` syscall 繞過 rseq 快取，在真實機器與模擬器上皆正確。
 - `TBB_HETERO_PIN=1`：worker 依 slot index 釘選，P-core 優先（slot 越小越先拿到
   P-core），讓實驗具決定性、消除 OS 遷移雜訊。
 
@@ -150,7 +154,7 @@ Branch：`oneTBB` repo 的 `caws`（`git diff master..caws`）。
 libtbb.a + 四個靜態 benchmark）、`gem5/scripts/vm_run_sims.sh`（四組模擬同時執行，
 完成後自動產出 `SUMMARY.txt` 並關機）；細節見 `gem5/README.md`。
 
-### 4.1 模擬系統規格（4P + 8E，1P:2E 核心比，`X86MinorCPU`）
+### 4.1 模擬系統規格（4P + 12E = 16 核，1P:3E 核心比，`X86MinorCPU`）
 
 > **CPU 模型選擇**：最初採用 gem5 的詳細亂序模型 `X86O3CPU`（實測過 ROB 512 與
 > 1024 兩種組態），但長時間 PARSEC 模擬會在特定 x86 微指令序列觸發 O3 的
@@ -172,7 +176,7 @@ libtbb.a + 四個靜態 benchmark）、`gem5/scripts/vm_run_sims.sh`（四組模
 | L1I / L1D | 32 KB 8-way / 48 KB 12-way（lat 1/3 cycles） |
 | L2 | **私有** 2 MB 16-way（lat 15） |
 
-**E-core（窄管線）— CPU 4–11**
+**E-core（窄管線）— CPU 4–15（共 12 顆）**
 
 | 參數 | 值 |
 |------|-----|
@@ -183,12 +187,13 @@ libtbb.a + 四個靜態 benchmark）、`gem5/scripts/vm_run_sims.sh`（四組模
 | LSQ（requests / transfers / store buffer） | 2 / 2 / 5 |
 | 分支預測 | TAGE-SC-L 8KB |
 | L1I / L1D | 64 KB 8-way / 32 KB 8-way |
-| L2 | **每 4 核 cluster 共享** 4 MB 16-way（lat 18），共 2 個 cluster |
+| L2 | **每 4 核 cluster 共享** 4 MB 16-way（lat 18），共 3 個 cluster |
 
 **Uncore**：共享 L3 16 MB 16-way（lat 42，mostly-exclusive）＋ DDR4-2400。
 此組態下 E/P 單執行緒算力比 α ≈ 0.45–0.55（頻率比 0.7 × 管線寬度差），
-與實體 Raptor Lake 的 P/E 比相當；雙 E-cluster 共享 L2 正是機制二
-「E←E 竊取較便宜」的結構性依據。
+與實體 Raptor Lake 的 P/E 比相當；3 個 E-cluster 各自共享 L2 正是機制二
+「E←E 竊取較便宜」的結構性依據。**核心總數取 16（2 的冪次）** 是為了讓
+fluidanimate（強制 2 冪次執行緒數）能用滿全部 16 核。
 
 ### 4.2 PARSEC 3.0 的 oneTBB 移植（`parsec-ports/`）
 
@@ -201,32 +206,33 @@ PARSEC 3.0 的 TBB 程式碼以 2008 年的 TBB API 撰寫，已完成移植並�
 | fluidanimate 任務樹 | `tbb::task::spawn_root_and_wait` 兩層樹（已移除） | `LaunchGrids<T>()` 以 `tbb::task_group` 重現相同 NUM_GRIDS×NUM_TASKS 切分 |
 | FlexImageLib BMP 載入 | `DWORD = unsigned long`（LP64 錯位） | `-DHAVE_STDINT_H=1`（原由 configure 定義） |
 
-功能驗證（CAWS 函式庫 + `TBB_HETERO_PCORES=0-3`）：bodytrack simsmall 輸出
-poses.txt 數值正常，竊取統計 E←E 205 次、終局退讓 772 次（證實 bodytrack 的
-barrier 密集特性）；fluidanimate 5 frames 輸出正常，E←E 82 次、終局退讓 74 次。
+功能驗證（CAWS 函式庫 + `TBB_HETERO_PCORES=0-3`）：bodytrack / fluidanimate
+輸出皆正常，竊取統計在 16 核系統上出現完整 P/E 四方向（`P←P`、`P←E`、`E←P`、
+`E←E`）且 `E←E` 主導、終局退讓 > 0——證明執行緒分類正確、CAWS 三機制確實在
+gem5 內生效（修正前因 glibc rseq 問題曾退化成「只有 P←P、declines 0」）。
 
 ### 4.3 執行指令與模擬數據
 
 ```bash
 # VM 端一鍵執行（四組同時；simsmall = 1000 粒子 5 層 / 5 frames）
 ~/vm_run_sims.sh 1000 5 5 poweroff
-# bodytrack:     <seqB_1> 4 1 1000 5 1 12   (thread model 1 = TBB, 12 threads)
-# fluidanimate:  8 5 in_35K.fluid out.fluid (8 = 2 的冪次分解限制)
+# bodytrack:     <seqB_1> 4 1 1000 5 1 16   (thread model 1 = TBB, 16 threads)
+# fluidanimate:  16 5 in_35K.fluid out.fluid (16 = 4P+12E，2 的冪次)
 # CAWS 組環境變數: TBB_HETERO_PCORES=0-3  TBB_HETERO_STATS=1
 ```
 
-煙霧測試（`ws_bench` 縮小版）已確認：12 核異質系統 elaborate 正常、SE mode
-多執行緒（clone/futex）正常、**CAWS 在 gem5 內正確啟用**（getcpu 分類成功、
-竊取統計輸出）、模擬完整跑完無 assertion；實測模擬速度 ≈ 87 KIPS／組
-（四組同時跑，各佔一顆 host 核心）。
+煙霧測試（`ws_bench` 縮小版）已確認：16 核異質系統 elaborate 正常、SE mode
+多執行緒（clone/futex）正常、**CAWS 在 gem5 內正確啟用**（getcpu 分類出完整
+P/E、`E←E` 50 次、終局退讓 264 次）、模擬完整跑完無 assertion；實測模擬速度
+≈ 65–75 KIPS／組（四組同時跑，各佔一顆 host 核心）。
 
-**四組正式模擬（完整 simsmall）正在執行中**，預計 fluidanimate ≈ 5–8 小時、
-bodytrack ≈ 9–14 小時；完成後 `SUMMARY.txt` 的 `simSeconds` 將填入下表：
+**四組正式模擬（完整 simsmall）正在執行中**，預計 fluidanimate ≈ 7–10 小時、
+bodytrack ≈ 12–16 小時；完成後 `SUMMARY.txt` 的 `simSeconds` 將填入下表：
 
-| Benchmark（simsmall, 4P+8E） | 修改前 simSeconds | 修改後 simSeconds | 加速 | 預估（執行前） |
+| Benchmark（simsmall, 4P+12E, 16 threads） | 修改前 simSeconds | 修改後 simSeconds | 加速 | 預估（執行前） |
 |------|------|------|------|------|
-| bodytrack（TBB, 12 threads） | 待填 | 待填 | 待填 | +8 ~ +15% |
-| fluidanimate（TBB, 8 threads） | 待填 | 待填 | 待填 | +5 ~ +12% |
+| bodytrack（TBB） | 待填 | 待填 | 待填 | +8 ~ +15% |
+| fluidanimate（TBB） | 待填 | 待填 | 待填 | +5 ~ +12% |
 
 預估依據為機制分析：CAWS 的收益主要來自 barrier 收尾長尾的消除，
 故 barrier 密度極高、粒子權重不平衡的 bodytrack 預期效益較高；
