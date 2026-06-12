@@ -27,8 +27,60 @@
 #include "oneapi/tbb/tbb_allocator.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <functional>
+#include <sched.h>
+
+// [cache-aware Phase 5] One-time map of CPU id → core group.
+// Reads /sys/devices/system/cpu/cpuN/cpufreq/cpuinfo_max_freq at first use.
+// group 0 = P-core (freq >= 4 GHz), group 1 = E-core (freq < 4 GHz), -1 = unknown.
+namespace {
+struct CpuGroupMap {
+    static constexpr int MAX_CPUS = 256;
+    static constexpr long PCORE_KHZ = 4000000L;
+
+    int       group[MAX_CPUS];
+    int       total_cpus;
+    int       count[2];      // count[0]=P-cores, count[1]=E-cores
+    cpu_set_t cpuset[2];     // cpuset[0]=P-core mask, cpuset[1]=E-core mask
+
+    CpuGroupMap() : total_cpus(0), count{0, 0} {
+        std::memset(group, -1, sizeof(group));
+        CPU_ZERO(&cpuset[0]);
+        CPU_ZERO(&cpuset[1]);
+        for (int i = 0; i < MAX_CPUS; ++i) {
+            char path[128];
+            std::snprintf(path, sizeof(path),
+                "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+            FILE* f = std::fopen(path, "r");
+            if (!f) {
+                if (total_cpus > 0) break;
+                continue;
+            }
+            long freq = 0;
+            bool ok = (std::fscanf(f, "%ld", &freq) == 1);
+            std::fclose(f);
+            if (!ok) continue;
+            int g = (freq >= PCORE_KHZ) ? 0 : 1;
+            group[i] = g;
+            ++count[g];
+            CPU_SET(i, &cpuset[g]);
+            total_cpus = i + 1;
+        }
+    }
+
+    int get(int cpu) const {
+        return (cpu >= 0 && cpu < MAX_CPUS) ? group[cpu] : -1;
+    }
+};
+
+// C++11 guarantees that static local initialization is thread-safe.
+static const CpuGroupMap& cpu_groups() {
+    static CpuGroupMap map;
+    return map;
+}
+} // anonymous namespace
 
 namespace tbb {
 namespace detail {
@@ -158,8 +210,11 @@ std::size_t arena::occupy_free_slot_in_range( thread_data& tls, std::size_t lowe
     std::size_t index = tls.my_arena_index;
     if ( index < lower || index >= upper ) index = tls.my_random.get() % (upper - lower) + lower;
     __TBB_ASSERT( index >= lower && index < upper, nullptr);
+    // [cache-aware] Fast-path: try the previously used slot first before scanning.
+    // If it is still free, reuse it immediately to preserve cache locality.
+    if ( my_slots[index].try_occupy() ) return index;
     // Find a free slot
-    for ( std::size_t i = index; i < upper; ++i )
+    for ( std::size_t i = index + 1; i < upper; ++i )
         if (my_slots[i].try_occupy()) return i;
     for ( std::size_t i = lower; i < index; ++i )
         if (my_slots[i].try_occupy()) return i;
@@ -171,11 +226,52 @@ std::size_t arena::occupy_free_slot(thread_data& tls) {
     // Firstly, external threads try to occupy reserved slots
     std::size_t index = as_worker ? out_of_arena : occupy_free_slot_in_range( tls,  0, my_num_reserved_slots );
     if ( index == out_of_arena ) {
-        // Secondly, all threads try to occupy all non-reserved slots
-        index = occupy_free_slot_in_range(tls, my_num_reserved_slots, my_num_slots );
-        // Likely this arena is already saturated
-        if ( index == out_of_arena )
-            return out_of_arena;
+        // [cache-aware Phase 5] Worker threads prefer slots in their P/E-core group.
+        // This steers each cluster's threads toward a stable, non-overlapping slot range,
+        // reducing work-stealing across the P/E boundary and improving LLC locality.
+        if (as_worker) {
+            const CpuGroupMap& gmap = cpu_groups();
+            // Only apply partitioning when E-cores are present (heterogeneous topology).
+            if (gmap.count[1] > 0 && gmap.total_cpus > 0) {
+                int cpu = sched_getcpu();
+                int grp = gmap.get(cpu);
+                if (grp >= 0) {
+                    unsigned nw = my_num_slots - my_num_reserved_slots;
+                    // Partition worker slots proportionally to P/E-core counts.
+                    // P-core slots: [my_num_reserved_slots, p_upper)
+                    // E-core slots: [p_upper, my_num_slots)
+                    unsigned p_upper = my_num_reserved_slots +
+                        (unsigned)((std::size_t)nw * (unsigned)gmap.count[0]
+                                   / (unsigned)gmap.total_cpus);
+                    unsigned p_count = p_upper - my_num_reserved_slots;
+                    unsigned e_count = my_num_slots - p_upper;
+                    // [Phase 6] Only partition when both groups have >= 2 slots.
+                    // With too few total workers (e.g. nw=3 → e_count=1) a single
+                    // E-core slot causes heavy contention and frequent fallback.
+                    if (p_count >= 2 && e_count >= 2) {
+                        std::size_t glo = (grp == 0) ? (std::size_t)my_num_reserved_slots
+                                                     : (std::size_t)p_upper;
+                        std::size_t ghi = (grp == 0) ? (std::size_t)p_upper
+                                                     : (std::size_t)my_num_slots;
+                        index = occupy_free_slot_in_range(tls, glo, ghi);
+                        // [Phase 7] Pin this thread to its cluster's CPU set so that
+                        // sched_getcpu() reliably reflects the correct group on re-entry.
+                        if (index != out_of_arena) {
+                            int actual_grp = (index < (std::size_t)p_upper) ? 0 : 1;
+                            sched_setaffinity(0, sizeof(cpu_set_t),
+                                              &gmap.cpuset[actual_grp]);
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback (or non-worker / no group info): search the full worker slot range
+        if ( index == out_of_arena ) {
+            index = occupy_free_slot_in_range(tls, my_num_reserved_slots, my_num_slots );
+            // Likely this arena is already saturated
+            if ( index == out_of_arena )
+                return out_of_arena;
+        }
     }
 
     atomic_update( my_limit, (unsigned)(index + 1), std::less<unsigned>() );
