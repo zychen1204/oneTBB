@@ -138,6 +138,12 @@ struct hetero_state {
     bool enabled = false;
     bool pin = false;
     bool stats = false;
+    // True when the P-core set came from TBB_HETERO_PCORES, i.e. the user
+    // declared "these are P, every other CPU is E". Lets classify() treat a CPU
+    // beyond the detected count as E instead of unknown -- important under
+    // simulators where sysconf(_SC_NPROCESSORS_CONF) under-reports the CPU count
+    // (e.g. gem5 SE returned 8 for a 16-core guest, leaving CPUs 8-15 unknown).
+    bool explicit_pcores = false;
     unsigned endgame = 0;
     unsigned patience = 8;
     unsigned p_count = 0;
@@ -163,6 +169,7 @@ struct hetero_state {
                 for (std::size_t i = 0; i < p_mask.size() && i < e_mask.size(); ++i)
                     if (p_mask[i]) e_mask[i] = 0;
                 have_e = true;
+                explicit_pcores = true;
             }
         }
         // 2. Intel hybrid sysfs interface.
@@ -230,7 +237,13 @@ bool hetero_topology::enabled() { return state().enabled; }
 
 core_class hetero_topology::classify(int cpu) {
     const hetero_state& s = state();
-    if (!s.enabled || cpu < 0 || cpu >= (int)s.klass.size()) return core_class::unknown;
+    if (!s.enabled || cpu < 0) return core_class::unknown;
+    if (cpu >= (int)s.klass.size()) {
+        // Beyond the detected CPU count. With an explicit P-core list, anything
+        // not declared P is E by definition (the detected array just happened to
+        // be too short); otherwise we genuinely do not know.
+        return s.explicit_pcores ? core_class::efficiency : core_class::unknown;
+    }
     return (core_class)s.klass[cpu];
 }
 
